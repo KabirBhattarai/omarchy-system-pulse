@@ -30,9 +30,46 @@ computed from jiffie deltas between ticks; history is kept in-memory only.
 ## Install
 
 ```bash
-omarchy-shell shell rescanPlugins     # or just restart the shell
+omarchy plugin add https://github.com/KabirBhattarai/omarchy-system-pulse --enable
+```
+
+Or from an existing clone:
+
+```bash
 omarchy plugin enable kb.system-pulse right
 ```
+
+The widget mounts in the right bar section. Left click opens the review popup.
+
+## Remove
+
+```bash
+omarchy plugin disable kb.system-pulse     # take the widget off the bar
+omarchy plugin remove kb.system-pulse      # delete the installed copy
+```
+
+If you installed it by cloning into `~/.config/omarchy/plugins/kb.system-pulse/`
+manually, disable it first, then delete that folder and remove its entry from
+the `bar.layout` section of `~/.config/omarchy/shell.json`.
+
+## Dependencies
+
+None beyond a stock Omarchy install:
+
+- `bash` — runs `scripts/sysprobe` (ships with Arch)
+- kernel interfaces — `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`,
+  `/proc/uptime`, cpufreq sysfs, `/sys/class/hwmon`; all exposed by the
+  standard Linux kernel, no extra packages
+- optional: `btop` for the default middle-click action (already ships with
+  Omarchy; change or empty `middleAction` to disable)
+
+The plugin never writes to your configuration; the only file it modifies is
+its own entry in `~/.config/omarchy/shell.json` when you toggle icon-only mode
+via right-click.
+
+## Preview
+
+![preview](preview.png)
 
 ## Settings
 
@@ -65,6 +102,10 @@ Example entry:
 omarchy-shell kb.system-pulse toggle
 omarchy-shell kb.system-pulse status
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Files
 

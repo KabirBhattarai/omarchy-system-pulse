@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "kb.system-pulse",
+  "name": "System Pulse",
+  "version": "1.0.0",
+  "author": "kb",
+  "description": "Minimal CPU, memory, and temperature review. Live bar read-out with a popup: usage sparkline, per-core load, memory + swap tracks, and a hwmon sensor list.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "System Pulse",
+    "description": "CPU / RAM / temperature review with sparkline and sensors",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

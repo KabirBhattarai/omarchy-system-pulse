@@ -1,0 +1,70 @@
+#!/bin/bash
+# kb.system-pulse probe: emits a single-line JSON snapshot of CPU jiffies,
+# per-core jiffies, memory, load average, frequency, temperatures, and uptime.
+# Read by the plugin every refresh tick; deltas are computed in Model.js.
+set -u
+
+json_str() { printf '%s' "${1:-}" | tr -c 'A-Za-z0-9 ._-' '_'; }
+
+int_or() {
+  case "${1:-}" in
+    ''|*[!0-9]*) echo "$2" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# --- CPU jiffies (total + per-core) --------------------------------------
+cpu_json=$(awk '$1 == "cpu" { sub(/^cpu +/, ""); gsub(/ /, ","); printf "[%s]", $0; exit }' /proc/stat)
+cores_json=$(awk '/^cpu[0-9]+ /{ sub(/^cpu[0-9]+ /, ""); gsub(/ /, ","); printf "%s[%s]", s, $0; s="," }' /proc/stat)
+
+# --- Memory (kB) ----------------------------------------------------------
+mtotal=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+mavail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+stotal=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+sfree=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
+
+# --- Load average + uptime -------------------------------------------------
+read -r l1 l2 l3 _ < /proc/loadavg
+up=$(cut -d' ' -f1 /proc/uptime); up=${up%%.*}
+
+# --- Frequency (MHz): fastest core right now -------------------------------
+freq_khz=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null | sort -n | tail -n1)
+if [ -n "${freq_khz:-}" ]; then
+  fmhz=$((freq_khz / 1000))
+else
+  fmhz=$(awk '/^cpu MHz/{ v = $4 + 0; if (v > m) m = v } END{ printf "%d", m }' /proc/cpuinfo)
+fi
+
+# --- Temperatures: every readable hwmon temp input --------------------------
+temps=""
+sep=""
+for d in /sys/class/hwmon/hwmon*; do
+  [ -r "$d/name" ] || continue
+  chip=$(json_str "$(cat "$d/name" 2>/dev/null)")
+  for f in "$d"/temp*_input; do
+    [ -r "$f" ] || continue
+    mv=$(cat "$f" 2>/dev/null)
+    case "$mv" in *[!0-9-]*|''|-*) continue ;; esac
+    lbl=""; lf="${f%_input}_label"
+    [ -r "$lf" ] && lbl=$(json_str "$(cat "$lf" 2>/dev/null)")
+    high=0; hf="${f%_input}_max"
+    [ -r "$hf" ] && high=$(cat "$hf" 2>/dev/null)
+    crit=0; cf="${f%_input}_crit"
+    [ -r "$cf" ] && crit=$(cat "$cf" 2>/dev/null)
+    entry=$(printf '{"chip":"%s","label":"%s","milliC":%s,"high":%s,"crit":%s}' \
+      "$chip" "$lbl" "$mv" "$(int_or "$high" 0)" "$(int_or "$crit" 0)")
+    if [ -n "$temps" ]; then temps="$temps,$entry"; else temps="$entry"; fi
+  done
+done
+
+printf '{"cpu":%s,"cores":[%s],"mem":{"total":%s,"avail":%s,"swapTotal":%s,"swapFree":%s},"load":[%s,%s,%s],"uptimeSec":%s,"freqMhz":%s,"temps":[%s]}\n' \
+  "${cpu_json:-[]}" \
+  "${cores_json:-}" \
+  "$(int_or "$mtotal" 0)" \
+  "$(int_or "$mavail" 0)" \
+  "$(int_or "$stotal" 0)" \
+  "$(int_or "$sfree" 0)" \
+  "${l1:-0}" "${l2:-0}" "${l3:-0}" \
+  "$(int_or "$up" 0)" \
+  "$(int_or "$fmhz" 0)" \
+  "$temps"

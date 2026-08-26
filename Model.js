@@ -16,11 +16,47 @@ function truthy(value) {
   return s === "true" || s === "1" || s === "yes" || s === "on"
 }
 
+// Retention caps mirroring scripts/sysprobe. The producer already caps what
+// it emits; these enforce the same limits again before anything is kept in
+// the long-lived shell, so a hostile or broken sysfs value cannot balloon
+// memory or the UI.
+var CAPS = {
+  rawBytes: 16384,     // max probe line length accepted for parsing
+  cores: 128,          // per-core jiffie lines
+  cpuFields: 16,       // counters on the aggregate cpu line
+  coreFields: 16,      // counters per core line
+  temps: 32,           // temperature sensors
+  strLen: 24,          // chip / label string length
+  jiffies: 1e12,       // magnitude clamp per counter
+  tempMilli: 150000,   // 150 °C ceiling
+  tempMilliFloor: -20000,
+  thresholdMilli: 200000,
+  memKb: 1e12,         // magnitude clamp for kB figures
+  load: 10000,
+  uptimeSec: 3e9,
+  freqMhz: 1000000
+}
+
+// Producer already restricts to [A-Za-z0-9 ._-]; enforced again here.
+function safeStr(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/[^A-Za-z0-9 ._\-]/g, "_")
+    .slice(0, CAPS.strLen)
+}
+
+function cappedNum(v, max, min) {
+  var n = Number(v)
+  if (!isFinite(n)) return 0
+  if (min !== undefined && n < min) n = min
+  if (n > max) n = max
+  return n
+}
+
 // Parse one line of sysprobe output into a normalized snapshot. Returns null
 // when nothing usable came back so callers can keep last-good state visible.
 function parseProbe(raw) {
   var text = String(raw || "").trim()
-  if (!text) return null
+  if (!text || text.length > CAPS.rawBytes) return null
   var data
   try {
     data = JSON.parse(text)
@@ -29,48 +65,49 @@ function parseProbe(raw) {
   }
   if (!data || typeof data !== "object") return null
 
-  function numArr(v) {
+  function numArr(v, maxFields, maxValue) {
     if (!Array.isArray(v)) return []
     var out = []
-    for (var i = 0; i < v.length; i++) out.push(isFinite(Number(v[i])) ? Number(v[i]) : 0)
+    var n = Math.min(v.length, maxFields)
+    for (var i = 0; i < n; i++) out.push(cappedNum(v[i], maxValue, 0))
     return out
   }
 
   var mem = data.mem || {}
-  var load = numArr(data.load)
-  var rawTemps = Array.isArray(data.temps) ? data.temps : []
+  var load = numArr(data.load, 3, CAPS.load)
+  var rawTemps = Array.isArray(data.temps) ? data.temps.slice(0, CAPS.temps) : []
   var temps = []
   for (var t = 0; t < rawTemps.length; t++) {
     var s = rawTemps[t] || {}
     var milliC = Number(s.milliC)
     if (!isFinite(milliC)) continue
     // Drop obviously broken readings (-20 °C .. 150 °C is the sane band).
-    if (milliC < -20000 || milliC > 150000) continue
+    if (milliC < CAPS.tempMilliFloor || milliC > CAPS.tempMilli) continue
     temps.push({
-      chip: String(s.chip || ""),
-      label: String(s.label || ""),
+      chip: safeStr(s.chip),
+      label: safeStr(s.label),
       milliC: milliC,
-      high: isFinite(Number(s.high)) ? Number(s.high) : 0,
-      crit: isFinite(Number(s.crit)) ? Number(s.crit) : 0
+      high: cappedNum(s.high, CAPS.thresholdMilli, 0),
+      crit: cappedNum(s.crit, CAPS.thresholdMilli, 0)
     })
   }
 
-  var coresRaw = Array.isArray(data.cores) ? data.cores : []
+  var coresRaw = Array.isArray(data.cores) ? data.cores.slice(0, CAPS.cores) : []
   var cores = []
-  for (var c = 0; c < coresRaw.length; c++) cores.push(numArr(coresRaw[c]))
+  for (var c = 0; c < coresRaw.length; c++) cores.push(numArr(coresRaw[c], CAPS.coreFields, CAPS.jiffies))
 
   return {
-    cpu: numArr(data.cpu),
+    cpu: numArr(data.cpu, CAPS.cpuFields, CAPS.jiffies),
     cores: cores,
-    memTotalKb: Math.max(0, Number(mem.total) || 0),
-    memAvailKb: Math.max(0, Number(mem.avail) || 0),
-    swapTotalKb: Math.max(0, Number(mem.swapTotal) || 0),
-    swapFreeKb: Math.max(0, Number(mem.swapFree) || 0),
+    memTotalKb: cappedNum(mem.total, CAPS.memKb, 0),
+    memAvailKb: cappedNum(mem.avail, CAPS.memKb, 0),
+    swapTotalKb: cappedNum(mem.swapTotal, CAPS.memKb, 0),
+    swapFreeKb: cappedNum(mem.swapFree, CAPS.memKb, 0),
     load1: load.length > 0 ? load[0] : 0,
     load5: load.length > 1 ? load[1] : 0,
     load15: load.length > 2 ? load[2] : 0,
-    uptimeSec: Math.max(0, Number(data.uptimeSec) || 0),
-    freqMhz: Math.max(0, Number(data.freqMhz) || 0),
+    uptimeSec: cappedNum(data.uptimeSec, CAPS.uptimeSec, 0),
+    freqMhz: cappedNum(data.freqMhz, CAPS.freqMhz, 0),
     temps: temps
   }
 }
@@ -220,6 +257,8 @@ if (typeof module !== "undefined") {
   module.exports = {
     clamp: clamp,
     truthy: truthy,
+    CAPS: CAPS,
+    safeStr: safeStr,
     parseProbe: parseProbe,
     cpuBusyPct: cpuBusyPct,
     coreBusyPcts: coreBusyPcts,

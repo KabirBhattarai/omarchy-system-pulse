@@ -235,6 +235,7 @@ Panel {
                     font.family: root.bar.fontFamily
                     font.pixelSize: Style.font.caption
                     font.letterSpacing: 2
+                    textFormat: Text.PlainText
                   }
                   Row {
                     spacing: Style.space(2)
@@ -546,6 +547,7 @@ Panel {
                   color: root.muted
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
                 }
 
                 Text {
@@ -558,6 +560,7 @@ Panel {
                   color: severity === 2 ? root.hot : (severity === 1 ? root.fg : root.dimmer)
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
                 }
               }
             }

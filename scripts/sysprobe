@@ -2,20 +2,41 @@
 # kb.system-pulse probe: emits a single-line JSON snapshot of CPU jiffies,
 # per-core jiffies, memory, load average, frequency, temperatures, and uptime.
 # Read by the plugin every refresh tick; deltas are computed in Model.js.
+#
+# All system-derived values are capped before emission — core count, sensor
+# count, fields per array, string length, numeric width, and total output
+# bytes — so the JSON line stays small and well-formed no matter what the
+# machine exposes. Model.js enforces matching caps on the QML side.
 set -u
 
-json_str() { printf '%s' "${1:-}" | tr -c 'A-Za-z0-9 ._-' '_'; }
+MAX_CORES=128      # per-core jiffie lines
+MAX_FIELDS=10      # jiffie counters per line (kernel currently uses 8-10)
+MAX_TEMPS=16       # hwmon temperature inputs
+MAX_STR=24         # chip / label string length
+MAX_NUM=10         # digits per numeric field
+MAX_BYTES=16384    # hard ceiling on the whole JSON line
+
+json_str() { printf '%s' "${1:-}" | tr -c 'A-Za-z0-9 ._-' '_' | cut -c1-"$MAX_STR"; }
 
 int_or() {
   case "${1:-}" in
-    ''|*[!0-9]*) echo "$2" ;;
-    *) echo "$1" ;;
+    ''|*[!0-9-]*) echo "$2" ;;
+    *) printf '%s' "$1" | cut -c1-"$MAX_NUM" ;;
   esac
 }
 
-# --- CPU jiffies (total + per-core) --------------------------------------
-cpu_json=$(awk '$1 == "cpu" { sub(/^cpu +/, ""); gsub(/ /, ","); printf "[%s]", $0; exit }' /proc/stat)
-cores_json=$(awk '/^cpu[0-9]+ /{ sub(/^cpu[0-9]+ /, ""); gsub(/ /, ","); printf "%s[%s]", s, $0; s="," }' /proc/stat)
+# --- CPU jiffies (total + per-core), capped in count and field width -------
+cpu_json=$(awk -v mf="$MAX_FIELDS" '$1 == "cpu" { $1 = ""; if (NF > mf) NF = mf; sub(/^ +/, ""); gsub(/ /, ","); printf "[%s]", $0; exit }' /proc/stat)
+cores_json=$(awk -v mf="$MAX_FIELDS" -v mc="$MAX_CORES" '
+  /^cpu[0-9]+ / && n < mc {
+    n++
+    $1 = ""
+    if (NF > mf) NF = mf
+    sub(/^ +/, "")
+    gsub(/ /, ",")
+    printf "%s[%s]", (n > 1 ? "," : ""), $0
+  }
+' /proc/stat)
 
 # --- Memory (kB) ----------------------------------------------------------
 mtotal=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
@@ -25,38 +46,49 @@ sfree=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
 
 # --- Load average + uptime -------------------------------------------------
 read -r l1 l2 l3 _ < /proc/loadavg
-up=$(cut -d' ' -f1 /proc/uptime); up=${up%%.*}
+# awk coercion gives a canonical bounded float no matter what the field holds.
+fmt_load() { awk -v s="${1:-}" 'BEGIN{ printf "%.2f", (s + 0) }' | cut -c1-12; }
+l1=$(fmt_load "$l1"); l2=$(fmt_load "$l2"); l3=$(fmt_load "$l3")
+up=$(cut -d' ' -f1 /proc/uptime); up=${up%%.*}; up=$(int_or "$up" 0 | cut -c1-12)
 
 # --- Frequency (MHz): fastest core right now -------------------------------
-freq_khz=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null | sort -n | tail -n1)
+freq_khz=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null | sort -n | tail -n1 | cut -c1-"$MAX_NUM")
 if [ -n "${freq_khz:-}" ]; then
   fmhz=$((freq_khz / 1000))
 else
   fmhz=$(awk '/^cpu MHz/{ v = $4 + 0; if (v > m) m = v } END{ printf "%d", m }' /proc/cpuinfo)
 fi
+fmhz=$(int_or "$fmhz" 0 | cut -c1-"$MAX_NUM")
 
-# --- Temperatures: every readable hwmon temp input --------------------------
+# --- Temperatures: every readable hwmon temp input, capped ------------------
 temps=""
 sep=""
+count=0
 for d in /sys/class/hwmon/hwmon*; do
+  [ "$count" -lt "$MAX_TEMPS" ] || break
   [ -r "$d/name" ] || continue
   chip=$(json_str "$(cat "$d/name" 2>/dev/null)")
   for f in "$d"/temp*_input; do
+    [ "$count" -lt "$MAX_TEMPS" ] || break
     [ -r "$f" ] || continue
     mv=$(cat "$f" 2>/dev/null)
     case "$mv" in *[!0-9-]*|''|-*) continue ;; esac
     lbl=""; lf="${f%_input}_label"
     [ -r "$lf" ] && lbl=$(json_str "$(cat "$lf" 2>/dev/null)")
     high=0; hf="${f%_input}_max"
-    [ -r "$hf" ] && high=$(cat "$hf" 2>/dev/null)
+    [ -r "$hf" ] && high=$(int_or "$(cat "$hf" 2>/dev/null)" 0)
     crit=0; cf="${f%_input}_crit"
-    [ -r "$cf" ] && crit=$(cat "$cf" 2>/dev/null)
+    [ -r "$cf" ] && crit=$(int_or "$(cat "$cf" 2>/dev/null)" 0)
     entry=$(printf '{"chip":"%s","label":"%s","milliC":%s,"high":%s,"crit":%s}' \
-      "$chip" "$lbl" "$mv" "$(int_or "$high" 0)" "$(int_or "$crit" 0)")
+      "$chip" "$lbl" "$(int_or "$mv" 0)" "$high" "$crit")
     if [ -n "$temps" ]; then temps="$temps,$entry"; else temps="$entry"; fi
+    count=$((count + 1))
   done
 done
 
+# Byte ceiling is a last-resort guard: with the caps above the line stays
+# well under it, so truncation (which QML treats as a bad sample) can only
+# happen if a cap was somehow bypassed.
 printf '{"cpu":%s,"cores":[%s],"mem":{"total":%s,"avail":%s,"swapTotal":%s,"swapFree":%s},"load":[%s,%s,%s],"uptimeSec":%s,"freqMhz":%s,"temps":[%s]}\n' \
   "${cpu_json:-[]}" \
   "${cores_json:-}" \
@@ -67,4 +99,5 @@ printf '{"cpu":%s,"cores":[%s],"mem":{"total":%s,"avail":%s,"swapTotal":%s,"swap
   "${l1:-0}" "${l2:-0}" "${l3:-0}" \
   "$(int_or "$up" 0)" \
   "$(int_or "$fmhz" 0)" \
-  "$temps"
+  "$temps" | head -c "$MAX_BYTES"
+echo
